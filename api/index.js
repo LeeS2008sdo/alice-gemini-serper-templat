@@ -1,16 +1,15 @@
 const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 6;
-const MAX_HISTORY_MESSAGE_CHARS = 600;
+const MAX_HISTORY_MESSAGE_CHARS = 500;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 4100;
-const SERPER_TIMEOUT_MS = 450;
-const GEMINI_TIMEOUT_MS = 3500;
+const TOTAL_RESPONSE_BUDGET_MS = 4300;
+const SERPER_TIMEOUT_MS = 380;
+const GEMINI_TIMEOUT_MS = 3800;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
-  "Отвечай естественно, по-русски, кратко и так, чтобы ответ было удобно слушать.",
-  "Используй максимум 1–2 коротких предложения без списков и Markdown.",
-  "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них; не выдумывай факты.",
+  "Отвечай естественно, по-русски, кратко: 1–2 предложения, без списков и Markdown.",
+  "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них.",
   "Если точных данных нет, ответь кратко и честно."
 ].join(" ");
 
@@ -47,7 +46,7 @@ function fitAliceText(value) {
 
 function isSearchIntent(text, lastHistoryText = "") {
   const combined = `${text} ${lastHistoryText}`;
-  return /\b(latest|today|current|news|weather|price|exchange rate|search)\b|сегодня|сейчас|последн|новост|погод|градус|курс валют|найди|поищи|актуальн|сколько стоит/i.test(combined);
+  return /\b(latest|today|current|news|weather|price|exchange rate|search)\b|сегодня|сейчас|последн|новост|погод|градус|курс валют|найди|поищи|актуальн|сколько стоит|ташкент/i.test(combined);
 }
 
 function safeHistory(history) {
@@ -72,7 +71,7 @@ async function fetchJson(url, options, timeoutMs) {
 
 async function searchWeb(query, timeoutMs) {
   const key = process.env.SERPER_API_KEY;
-  if (!key || timeoutMs < 200) return "";
+  if (!key || timeoutMs < 150) return "";
 
   try {
     const { response, data } = await fetchJson(
@@ -92,12 +91,12 @@ async function searchWeb(query, timeoutMs) {
 
     const items = (Array.isArray(data.organic) ? data.organic : [])
       .slice(0, 2)
-      .map((item, i) => `${i + 1}. ${item.title || ""}: ${item.snippet || ""}`.trim());
+      .map(item => `${item.title || ""}: ${item.snippet || ""}`.trim());
 
     const answerBox = data.answerBox?.answer || data.answerBox?.snippet;
-    if (answerBox) items.unshift(`Факт: ${String(answerBox).slice(0, 200)}`);
+    if (answerBox) items.unshift(`Факт: ${String(answerBox).slice(0, 150)}`);
     return items.join("\n");
-  } catch (error) {
+  } catch {
     return "";
   }
 }
@@ -105,7 +104,7 @@ async function searchWeb(query, timeoutMs) {
 async function askGemini(text, history, searchContext, timeoutMs) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("MISSING_GEMINI_KEY");
-  if (timeoutMs < 250) throw new Error("TIME_BUDGET_EXHAUSTED");
+  if (timeoutMs < 200) throw new Error("TIME_BUDGET_EXHAUSTED");
 
   const model = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
   const contents = safeHistory(history).map(item => ({
@@ -114,7 +113,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   }));
 
   const prompt = searchContext
-    ? `${text}\n\nСправка:\n${searchContext}\nОтветь в 1-2 предложениях.`
+    ? `${text}\n\nСправка:\n${searchContext}\nОтветь очень кратко в 1-2 предложениях.`
     : text;
   contents.push({ role: "user", parts: [{ text: prompt }] });
 
@@ -130,7 +129,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
         contents,
         generationConfig: {
           temperature: 0.3,
-          maxOutputTokens: 100
+          maxOutputTokens: 90
         }
       })
     },
@@ -139,7 +138,6 @@ async function askGemini(text, history, searchContext, timeoutMs) {
 
   if (!response || !response.ok) {
     const status = Number(response?.status || 500);
-    console.error("Gemini failed:", status);
     if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
     if (status === 429) throw new Error("GEMINI_QUOTA");
     throw new Error("GEMINI_REQUEST_FAILED");
@@ -161,12 +159,12 @@ function errorForUser(error) {
     case "MISSING_GEMINI_KEY":
       return "Сервер пока не настроен. Проверьте GEMINI_API_KEY.";
     case "GEMINI_KEY_REJECTED":
-      return "Не удалось авторизоваться в нейросети. Проверьте ключ API.";
+      return "Не удалось подключиться к Gemini. Проверьте ключ.";
     case "GEMINI_QUOTA":
-      return "Превышен лимит запросов к нейросети. Попробуйте через минуту.";
+      return "Лимит запросов к нейросети исчерпан. Попробуйте через минуту.";
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
-      return "Не успела подготовить ответ. Попробуйте повторить чуть короче.";
+      return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз.";
     default:
       return "Не получилось получить ответ от нейросети. Попробуйте ещё раз чуть позже.";
   }
@@ -204,14 +202,16 @@ export default async function handler(req, res) {
       const searchQuery = (text.length <= 15 && /погод|курс|новост/i.test(lastMsg))
         ? `${lastMsg} ${text}`
         : text;
-      searchContext = await searchWeb(searchQuery, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2500)));
+      // Жесткий лимит на поиск: не более 380 мс
+      searchContext = await searchWeb(searchQuery, 380);
     }
 
+    // Gemini получает оставшееся время
     const answer = await askGemini(
       text,
       oldHistory,
       searchContext,
-      Math.max(0, remainingMs() - 200)
+      Math.max(100, remainingMs() - 150)
     );
 
     const history = [
