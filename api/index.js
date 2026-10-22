@@ -2,9 +2,9 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 3600;
-const SERPER_TIMEOUT_MS = 600;
-const GEMINI_TIMEOUT_MS = 2500;
+const TOTAL_RESPONSE_BUDGET_MS = 4200;
+const SERPER_TIMEOUT_MS = 1000;
+const GEMINI_TIMEOUT_MS = 3800;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
@@ -71,7 +71,7 @@ async function fetchJson(url, options, timeoutMs) {
 
 async function searchWeb(query, timeoutMs) {
   const key = process.env.SERPER_API_KEY;
-  if (!key || timeoutMs < 150) return "";
+  if (!key || timeoutMs < 300) return "";
 
   try {
     const { response, data } = await fetchJson(
@@ -128,13 +128,14 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     : text;
   contents.push({ role: "user", parts: [{ text: prompt }] });
 
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+
   const { response, data } = await fetchJson(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    url,
     {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": key
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
@@ -150,7 +151,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
 
   if (!response.ok) {
     const status = Number(response.status);
-    console.error("Gemini request failed with HTTP", status);
+    console.error("Gemini request failed with HTTP", status, JSON.stringify(data));
     if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
     if (status === 429) throw new Error("GEMINI_QUOTA");
     throw new Error("GEMINI_REQUEST_FAILED");
@@ -166,14 +167,12 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     if (data?.promptFeedback?.blockReason) throw new Error("GEMINI_BLOCKED");
     throw new Error("GEMINI_EMPTY_RESPONSE");
   }
-  if (candidate?.finishReason === "MAX_TOKENS") {
-    console.warn("Gemini reached the output token limit.");
-  }
   return answer;
 }
 
 function errorForUser(error) {
-  switch (error?.message) {
+  const msg = error?.message || String(error);
+  switch (msg) {
     case "MISSING_GEMINI_KEY":
       return "Сервер пока не настроен. Проверьте переменную GEMINI_API_KEY в настройках Vercel.";
     case "GEMINI_KEY_REJECTED":
@@ -221,15 +220,14 @@ export default async function handler(req, res) {
   try {
     let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
-      // Search has a very short budget because Alice expects a response within 4.5 seconds.
-      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2600)));
+      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2800)));
     }
 
     const answer = await askGemini(
       text,
       oldHistory,
       searchContext,
-      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 600))
+      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 300))
     );
 
     const history = [
@@ -240,9 +238,10 @@ export default async function handler(req, res) {
 
     return res.status(200).json(aliceResponse(answer, false, history));
   } catch (error) {
-    const safeError = error?.message === "AbortError" ? "TIME_BUDGET_EXHAUSTED" : error;
-    console.warn("Alice webhook returned a fallback response:", safeError?.message || "unknown error");
-    return res.status(200).json(aliceResponse(errorForUser(safeError), false, oldHistory));
+    const isAbort = error?.name === "AbortError" || error?.message === "AbortError";
+    const errorType = isAbort ? new Error("TIME_BUDGET_EXHAUSTED") : error;
+    console.warn("Alice webhook returned a fallback response:", error?.message || error);
+    return res.status(200).json(aliceResponse(errorForUser(errorType), false, oldHistory));
   }
 }
 
