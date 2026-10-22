@@ -2,15 +2,13 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_MESSAGE_CHARS = 500;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 4300;
-const SERPER_TIMEOUT_MS = 380;
-const GEMINI_TIMEOUT_MS = 3800;
+const TOTAL_RESPONSE_BUDGET_MS = 3800;
 
 const SYSTEM_PROMPT = [
-  "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
-  "Отвечай естественно, по-русски, кратко: 1–2 предложения, без списков и Markdown.",
-  "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них.",
-  "Если точных данных нет, ответь кратко и честно."
+  "Ты — голосовой помощник в навыке Яндекс Алисы.",
+  "Отвечай кратко, понятно и естественно: строго 1–2 коротких предложения.",
+  "Не используй списки, Markdown, смайлики и вводные конструкции.",
+  "Если вопрос о погоде или фактах, ответь своими словами максимально лаконично."
 ].join(" ");
 
 function aliceResponse(text, endSession = false, history = []) {
@@ -33,20 +31,8 @@ function fitAliceText(value) {
   if (text.length <= MAX_ALICE_TEXT) return text || "Не удалось подготовить ответ.";
 
   const candidate = text.slice(0, MAX_ALICE_TEXT - 1);
-  const sentenceEnd = Math.max(
-    candidate.lastIndexOf(". "),
-    candidate.lastIndexOf("! "),
-    candidate.lastIndexOf("? ")
-  );
-  if (sentenceEnd >= 200) return candidate.slice(0, sentenceEnd + 1).trim();
-
   const lastSpace = candidate.lastIndexOf(" ");
   return (lastSpace > 150 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
-}
-
-function isSearchIntent(text, lastHistoryText = "") {
-  const combined = `${text} ${lastHistoryText}`;
-  return /\b(latest|today|current|news|weather|price|exchange rate|search)\b|сегодня|сейчас|последн|новост|погод|градус|курс валют|найди|поищи|актуальн|сколько стоит|ташкент/i.test(combined);
 }
 
 function safeHistory(history) {
@@ -69,39 +55,7 @@ async function fetchJson(url, options, timeoutMs) {
   }
 }
 
-async function searchWeb(query, timeoutMs) {
-  const key = process.env.SERPER_API_KEY;
-  if (!key || timeoutMs < 150) return "";
-
-  try {
-    const { response, data } = await fetchJson(
-      "https://google.serper.dev/search",
-      {
-        method: "POST",
-        headers: {
-          "X-API-KEY": key,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ q: query, gl: "ru", hl: "ru", num: 2 })
-      },
-      Math.min(SERPER_TIMEOUT_MS, timeoutMs)
-    );
-
-    if (!response || !response.ok) return "";
-
-    const items = (Array.isArray(data.organic) ? data.organic : [])
-      .slice(0, 2)
-      .map(item => `${item.title || ""}: ${item.snippet || ""}`.trim());
-
-    const answerBox = data.answerBox?.answer || data.answerBox?.snippet;
-    if (answerBox) items.unshift(`Факт: ${String(answerBox).slice(0, 150)}`);
-    return items.join("\n");
-  } catch {
-    return "";
-  }
-}
-
-async function askGemini(text, history, searchContext, timeoutMs) {
+async function askGemini(text, history, timeoutMs) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("MISSING_GEMINI_KEY");
   if (timeoutMs < 200) throw new Error("TIME_BUDGET_EXHAUSTED");
@@ -112,10 +66,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     parts: [{ text: item.text }]
   }));
 
-  const prompt = searchContext
-    ? `${text}\n\nСправка:\n${searchContext}\nОтветь очень кратко в 1-2 предложениях.`
-    : text;
-  contents.push({ role: "user", parts: [{ text: prompt }] });
+  contents.push({ role: "user", parts: [{ text }] });
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
 
@@ -129,11 +80,11 @@ async function askGemini(text, history, searchContext, timeoutMs) {
         contents,
         generationConfig: {
           temperature: 0.3,
-          maxOutputTokens: 90
+          maxOutputTokens: 80
         }
       })
     },
-    Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
+    timeoutMs
   );
 
   if (!response || !response.ok) {
@@ -159,12 +110,12 @@ function errorForUser(error) {
     case "MISSING_GEMINI_KEY":
       return "Сервер пока не настроен. Проверьте GEMINI_API_KEY.";
     case "GEMINI_KEY_REJECTED":
-      return "Не удалось подключиться к Gemini. Проверьте ключ.";
+      return "Не удалось авторизоваться в нейросети. Проверьте ключ API.";
     case "GEMINI_QUOTA":
-      return "Лимит запросов к нейросети исчерпан. Попробуйте через минуту.";
+      return "Превышен лимит запросов к нейросети. Попробуйте через минуту.";
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
-      return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз.";
+      return "Не успела подготовить ответ. Попробуйте спросить ещё раз чуть короче.";
     default:
       return "Не получилось получить ответ от нейросети. Попробуйте ещё раз чуть позже.";
   }
@@ -188,30 +139,17 @@ export default async function handler(req, res) {
 
   if (!text) {
     return res.status(200).json(aliceResponse(
-      "Привет! Я могу ответить на вопрос или найти актуальную информацию. Что хотите узнать?",
+      "Привет! О чем хотите поговорить?",
       false,
       oldHistory
     ));
   }
 
   try {
-    let searchContext = "";
-    const lastMsg = oldHistory.length ? oldHistory[oldHistory.length - 1].text : "";
-
-    if (isSearchIntent(text, lastMsg) && process.env.SERPER_API_KEY) {
-      const searchQuery = (text.length <= 15 && /погод|курс|новост/i.test(lastMsg))
-        ? `${lastMsg} ${text}`
-        : text;
-      // Жесткий лимит на поиск: не более 380 мс
-      searchContext = await searchWeb(searchQuery, 380);
-    }
-
-    // Gemini получает оставшееся время
     const answer = await askGemini(
       text,
       oldHistory,
-      searchContext,
-      Math.max(100, remainingMs() - 150)
+      Math.max(100, remainingMs() - 200)
     );
 
     const history = [
@@ -229,4 +167,4 @@ export default async function handler(req, res) {
   }
 }
 
-export { aliceResponse, fitAliceText, isSearchIntent, safeHistory };
+export { aliceResponse, fitAliceText, safeHistory };
