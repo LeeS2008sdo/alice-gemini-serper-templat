@@ -1,15 +1,10 @@
 const DEFAULT_MODEL = "gemini-3.5-flash-lite";
-const MAX_HISTORY_MESSAGES = 4;
-const MAX_HISTORY_MESSAGE_CHARS = 400;
+const MAX_HISTORY_MESSAGES = 2;
+const MAX_HISTORY_MESSAGE_CHARS = 300;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 4350;
-const GEMINI_TIMEOUT_MS = 4150;
+const TOTAL_RESPONSE_BUDGET_MS = 4200;
 
-const SYSTEM_PROMPT = [
-  "Ты — голосовой помощник в навыке Яндекс Алисы.",
-  "Отвечай кратко, естественно и понятно: максимум 1–2 коротких предложения.",
-  "Никогда не используй списки, Markdown или длинные вступления."
-].join(" ");
+const SYSTEM_PROMPT = "Ты голосовой ассистент Алиса. Отвечай мгновенно, без рассуждений, строго 1 короткое предложение.";
 
 function aliceResponse(text, endSession = false, history = []) {
   return {
@@ -32,7 +27,7 @@ function fitAliceText(value) {
 
   const candidate = text.slice(0, MAX_ALICE_TEXT - 1);
   const lastSpace = candidate.lastIndexOf(" ");
-  return (lastSpace > 150 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
+  return (lastSpace > 100 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
 }
 
 function safeHistory(history) {
@@ -43,19 +38,7 @@ function safeHistory(history) {
     .map(item => ({ role: item.role, text: item.text.slice(0, MAX_HISTORY_MESSAGE_CHARS) }));
 }
 
-async function fetchJson(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.max(100, timeoutMs));
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    const data = await response.json().catch(() => ({}));
-    return { response, data };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function askGemini(text, history, timeoutMs) {
+async function askGeminiFast(text, history, timeoutMs) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("MISSING_GEMINI_KEY");
   if (timeoutMs < 200) throw new Error("TIME_BUDGET_EXHAUSTED");
@@ -68,40 +51,48 @@ async function askGemini(text, history, timeoutMs) {
 
   contents.push({ role: "user", parts: [{ text }] });
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(100, timeoutMs));
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
 
-  const { response, data } = await fetchJson(
-    url,
-    {
+  try {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        systemInstruction: { 
+          parts: [{ text: "Ты голосовой ассистент Алиса. Отвечай сразу, строго 1 предложение, без вступительных слов и списков." }] 
+        },
         contents,
         generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 70
+          temperature: 0.1,
+          maxOutputTokens: 50
         }
       })
-    },
-    Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
-  );
+    });
 
-  if (!response || !response.ok) {
-    const status = Number(response?.status || 500);
-    if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
-    if (status === 429) throw new Error("GEMINI_QUOTA");
-    throw new Error("GEMINI_REQUEST_FAILED");
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const status = Number(response.status || 500);
+      if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
+      if (status === 429) throw new Error("GEMINI_QUOTA");
+      throw new Error("GEMINI_REQUEST_FAILED");
+    }
+
+    const candidate = data?.candidates?.[0];
+    const answer = (candidate?.content?.parts || [])
+      .map(p => typeof p.text === "string" ? p.text : "")
+      .join("")
+      .trim();
+
+    if (!answer) throw new Error("GEMINI_EMPTY_RESPONSE");
+    return answer;
+  } finally {
+    clearTimeout(timer);
   }
-
-  const candidate = data?.candidates?.[0];
-  const answer = (candidate?.content?.parts || [])
-    .map(p => typeof p.text === "string" ? p.text : "")
-    .join("")
-    .trim();
-
-  if (!answer) throw new Error("GEMINI_EMPTY_RESPONSE");
-  return answer;
 }
 
 function errorForUser(error) {
@@ -115,7 +106,7 @@ function errorForUser(error) {
       return "Превышен лимит запросов к нейросети. Попробуйте через минуту.";
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
-      return "Не успела подготовить ответ. Попробуйте спросить ещё раз чуть короче.";
+      return "Не успела подготовить ответ. Попробуйте ещё раз чуть короче.";
     default:
       return "Не получилось получить ответ от нейросети. Попробуйте ещё раз чуть позже.";
   }
@@ -146,10 +137,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const answer = await askGemini(
+    const answer = await askGeminiFast(
       text,
       oldHistory,
-      Math.max(100, remainingMs() - 150)
+      Math.max(100, remainingMs() - 100)
     );
 
     const history = [
