@@ -1,14 +1,14 @@
 const DEFAULT_MODEL = "gemini-3.5-flash-lite";
-const MAX_HISTORY_MESSAGES = 6;
-const MAX_HISTORY_MESSAGE_CHARS = 500;
+const MAX_HISTORY_MESSAGES = 4;
+const MAX_HISTORY_MESSAGE_CHARS = 400;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 3800;
+const TOTAL_RESPONSE_BUDGET_MS = 4350;
+const GEMINI_TIMEOUT_MS = 4150;
 
 const SYSTEM_PROMPT = [
   "Ты — голосовой помощник в навыке Яндекс Алисы.",
-  "Отвечай кратко, понятно и естественно: строго 1–2 коротких предложения.",
-  "Не используй списки, Markdown, смайлики и вводные конструкции.",
-  "Если вопрос о погоде или фактах, ответь своими словами максимально лаконично."
+  "Отвечай кратко, естественно и понятно: максимум 1–2 коротких предложения.",
+  "Никогда не используй списки, Markdown или длинные вступления."
 ].join(" ");
 
 function aliceResponse(text, endSession = false, history = []) {
@@ -79,12 +79,12 @@ async function askGemini(text, history, timeoutMs) {
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents,
         generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 80
+          temperature: 0.2,
+          maxOutputTokens: 70
         }
       })
     },
-    timeoutMs
+    Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
   );
 
   if (!response || !response.ok) {
@@ -149,7 +149,7 @@ export default async function handler(req, res) {
     const answer = await askGemini(
       text,
       oldHistory,
-      Math.max(100, remainingMs() - 200)
+      Math.max(100, remainingMs() - 150)
     );
 
     const history = [
