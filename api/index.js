@@ -2,9 +2,9 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 4200;
-const SERPER_TIMEOUT_MS = 1000;
-const GEMINI_TIMEOUT_MS = 3800;
+const TOTAL_RESPONSE_BUDGET_MS = 4500;
+const SERPER_TIMEOUT_MS = 800;
+const GEMINI_TIMEOUT_MS = 4100;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
@@ -142,7 +142,10 @@ async function askGemini(text, history, searchContext, timeoutMs) {
         contents,
         generationConfig: {
           temperature: 0.5,
-          maxOutputTokens: 240
+          maxOutputTokens: 200,
+          thinkingConfig: {
+            thinkingBudget: 0
+          }
         }
       })
     },
@@ -220,14 +223,14 @@ export default async function handler(req, res) {
   try {
     let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
-      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2800)));
+      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 3200)));
     }
 
     const answer = await askGemini(
       text,
       oldHistory,
       searchContext,
-      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 300))
+      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 250))
     );
 
     const history = [
